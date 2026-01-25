@@ -1,0 +1,23 @@
+
+seed: 42
+run_name: plinder_small_debug
+device: cpu
+
+plinder:
+  root: data/plinder/2024-06/v2
+  # Directory containing PLINDER 'systems' and 'splits'
+  # Example: after download_plinder.py, you will have:
+  # data/plinder/2024-06/v2/splits/...
+  # data/plinder/2024-06/v2/systems/..
+  split_name: plinder_small   # arbitrary label used for output folder
+  # If you want, point this to a CSV/JSONL with system IDs. Otherwise, use --system_ids in CLI.
+  system_list_path: ""
+
+preprocess:
+  out_dir: data/processed/plinder_small
+  pocket_cutoff_A: 10.0
+  pocket_knn: 24
+  cross_knn: 32
+  include_hydrogens: false
+  max_pocket_atoms: 2048
+  max_ligand_atoms: 256

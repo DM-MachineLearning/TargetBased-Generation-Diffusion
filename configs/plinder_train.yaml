@@ -1,0 +1,23 @@
+
+seed: 42
+run_name: plinder_train_debug
+device: cpu
+
+data:
+  name: plinder
+  root: data/processed/plinder_small
+
+model:
+  hidden: 128
+  layers: 4
+  atom_types: 64   # max atom types supported
+
+diffusion:
+  T: 50
+  beta_start: 1e-4
+  beta_end: 2e-2
+
+train:
+  epochs: 5
+  batch_size: 1
+  lr: 1e-3

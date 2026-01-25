@@ -1,0 +1,13 @@
+
+name: taprdiff
+channels:
+  - conda-forge
+  - rdkit
+dependencies:
+  - python=3.10
+  - pytorch
+  - rdkit
+  - gemmi
+  - numpy
+  - pyyaml
+  - tqdm

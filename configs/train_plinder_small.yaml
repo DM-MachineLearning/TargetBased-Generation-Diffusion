@@ -1,0 +1,31 @@
+
+seed: 42
+run_name: train_plinder_small
+device: cpu
+
+data:
+  processed_root: data/processed/plinder_small
+  max_ligand_atoms: 128
+  max_pocket_atoms: 1024
+  max_edges: 1024
+  atom_vocab_size: 64
+  bond_vocab_size: 4
+
+model:
+  hidden: 256
+  layers: 4
+  k_cross: 32
+
+diffusion:
+  T: 100
+  schedule: cosine
+  beta_start: 1e-4
+  beta_end: 2e-2
+
+train:
+  epochs: 5
+  batch_size: 4
+  lr: 2e-4
+  lambda_x: 1.0
+  lambda_a: 1.0
+  lambda_b: 1.0

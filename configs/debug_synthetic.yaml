@@ -1,0 +1,8 @@
+
+seed: 42
+run_name: debug_synthetic
+device: cpu
+data: {name: synthetic, n_samples: 128, n_atoms: 16, n_pocket: 24, atom_types: 8}
+model: {hidden: 128, layers: 4}
+diffusion: {T: 50, beta_start: 1e-4, beta_end: 2e-2}
+train: {epochs: 2, batch_size: 16, lr: 1e-3}
