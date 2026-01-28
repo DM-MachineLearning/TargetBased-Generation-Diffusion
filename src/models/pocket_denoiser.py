@@ -119,10 +119,12 @@ class PocketConditionedDenoiser(nn.Module):
 
             # Cross messages ligand <- pocket via kNN
             knn = self._cross_knn(X_t, Xp, lig_mask, pocket_mask, self.k_cross)  # [B,Nl,k]
-            # gather pocket embeddings and coords
-            hPk = hP.gather(1, knn[:,:, :, None].expand(-1,-1,-1,self.hidden))  # [B,Nl,k,H]
-            xPk = Xp.gather(1, knn[:,:,:,None].expand(-1,-1,-1,3))              # [B,Nl,k,3]
-            xL  = X_t[:,:,None,:].expand(-1,-1,knn.shape[2],-1)
+            # gather pocket embeddings and coords using proper indexing
+            # hP: [B,Np,H], knn: [B,Nl,k] -> hPk: [B,Nl,k,H]
+            B, Nl, k = knn.shape
+            hPk = hP[torch.arange(B, device=hP.device)[:, None, None], knn]  # [B,Nl,k,H]
+            xPk = Xp[torch.arange(B, device=Xp.device)[:, None, None], knn]  # [B,Nl,k,3]
+            xL  = X_t[:,:,None,:].expand(-1,-1,k,-1)
             rel = xPk - xL
             dist = torch.linalg.norm(rel, dim=-1, keepdim=True).clamp_min(1e-6)
             rel_unit = rel / dist

@@ -37,9 +37,11 @@ def _find_first(system_dir: Path, patterns: List[str]) -> Path:
 def _load_ligand(system_dir: Path):
     # Try common ligand formats
     # PLINDER systems often include system.cif containing ligand; but bond orders are best from SDF if present.
+    # Also check ligand_files/ subdirectory (common in PLINDER)
     sdf_patterns = [
         "*ligand*.sdf", "*ligands*.sdf", "*ligand*.mol", "*ligand*.mol2",
-        "ligand.sdf", "ligand.mol", "ligand.mol2"
+        "ligand.sdf", "ligand.mol", "ligand.mol2",
+        "ligand_files/*.sdf", "ligand_files/*.mol", "ligand_files/*.mol2",
     ]
     try:
         lig_path = _find_first(system_dir, sdf_patterns)
