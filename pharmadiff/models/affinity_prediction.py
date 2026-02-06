@@ -49,7 +49,12 @@ class TimeAwareAffinityPredictor(nn.Module):
         t_emb = self.time_mlp(t_emb)
         
         # Combine Graphs (Ligand + Protein)
-        # Note: In production, careful batch handling is needed here
+        # Handle Batching
+        if lig_batch is None: # Fallback for Batch Size 1
+            lig_batch = torch.zeros(lig_pos.shape[0], dtype=torch.long, device=lig_pos.device)
+        if prot_batch is None:
+            prot_batch = torch.zeros(prot_pos.shape[0], dtype=torch.long, device=prot_pos.device)
+            
         x_lig = self.lig_emb(lig_feat) + t_emb # Inject time into features
         x_prot = self.prot_emb(prot_feat) # Protein is clean, no time needed (or add it too)
         
@@ -57,7 +62,8 @@ class TimeAwareAffinityPredictor(nn.Module):
         pos = torch.cat([lig_pos, prot_pos], dim=0)
         
         # Create edges (simplified radius graph)
-        edge_index = self._build_edges(pos) 
+        batch_idx = torch.cat([lig_batch, prot_batch], dim=0)
+        edge_index = self._build_edges(pos, batch_idx) 
 
         # Message Passing
         x = self.conv1(x, edge_index, coord=pos)
@@ -65,12 +71,11 @@ class TimeAwareAffinityPredictor(nn.Module):
         x = self.conv3(x, edge_index, coord=pos)
         
         # Global Pooling (Only pool the LIGAND nodes for prediction)
-        num_lig_nodes = lig_pos.shape[0]
-        graph_emb = x[:num_lig_nodes].mean(dim=0, keepdim=True)
+        from torch_geometric.nn import global_mean_pool
+        ligand_readout = global_mean_pool(x[:lig_pos.shape[0]], lig_batch)
         
-        return self.readout(graph_emb)
+        return self.readout(ligand_readout)
 
-    def _build_edges(self, pos, radius=5.0):
+    def _build_edges(self, pos, batch_idx, radius=5.0):
         from torch_cluster import radius_graph
-        batch = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
-        return radius_graph(pos, r=radius, batch=batch)
+        return radius_graph(pos, r=radius, batch=batch_idx)
