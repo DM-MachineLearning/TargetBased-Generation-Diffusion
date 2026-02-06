@@ -44,13 +44,16 @@ def train_affinity_predictor():
             # x_t = sqrt(alpha_bar) * x_0 + sqrt(1 - alpha_bar) * eps
             sqrt_alpha = torch.sqrt(alpha_bars)
             sqrt_one_minus_alpha = torch.sqrt(1 - alpha_bars)
+
+            num_types = lig_feat.shape[-1]
+            uniform_dist = torch.ones_like(lig_feat) / num_types
             
             # Broadcast scalar t factors to node dimensions
             # (assuming simple batching for brevity - use torch_geometric Batch in production)
-            lig_pos_noisy = (sqrt_alpha * lig_pos_clean) + (sqrt_one_minus_alpha * noise)
+            lig_pos_noisy = (sqrt_alpha * lig_feat) + (sqrt_one_minus_alpha * uniform_dist)
             
             # D. Predict Affinity from NOISY structure
-            pred_affinity = model(lig_pos_noisy, lig_feat, prot_pos, prot_feat, t)
+            pred_affinity = model(lig_pos_noisy, lig_feat_noisy, prot_pos, prot_feat, t)
             
             # E. Loss
             # We want the model to predict the TRUE affinity even from noisy structures
