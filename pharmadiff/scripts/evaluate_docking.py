@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from rdkit import Chem
-from rkdit.Chem import AllChem
+from rdkit.Chem import AllChem
 from scipy.spatial.distance import cdist
 import warnings
 from vina import Vina
@@ -61,7 +61,7 @@ def evaluate_generation(generated_mols, protein_pdb, pocket_center):
             affintiy = calculate_vina_affinity(mol, protein_pdb, pocket_center)
             results['affintiy'].append(affintiy)
         else:
-            results['affintiy'].append(0.0) # Penalize for clashes
+            results['affinity'].append(0.0) # Penalize for clashes
 
     print(f"Mean Clashes: {np.mean(results['clashes'])}")
     print(f"Mean Affinity: {np.mean(results['affintiy'])}")
