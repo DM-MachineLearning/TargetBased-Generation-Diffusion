@@ -40,7 +40,7 @@ def calculate_vina_affinity(ligand_mol, protein_pdb_path, center, box_size=[20, 
         v.set_ligand_from_string(ligand_pdbqt)
 
         v.compute_vina_maps(center=center, box_size=box_size)
-
+        v.optimize()
         energy = v.score()
         return energy[0]
     except Exception as e:
