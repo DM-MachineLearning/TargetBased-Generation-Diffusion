@@ -539,8 +539,8 @@ class FullDenoisingDiffusion(pl.LightningModule):
                                         atom_decoder=self.dataset_infos.atom_decoder, 
                                         pharma_feat=pharma_feat, pharma_coord=pharma_coord)
 
-            is_valid_valence = self.validate_chemical_valence(mol.rdkit_mol)
-            if not is_valid_valence:
+            mol.valence_valid = self.validate_chemical_valence(mol.rdkit_mol)
+            if not mol.valence_valid:
                 mol.validity = 0
             molecule_list.append(mol)
 
