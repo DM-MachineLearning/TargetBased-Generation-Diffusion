@@ -538,7 +538,10 @@ class FullDenoisingDiffusion(pl.LightningModule):
                                         bond_types=edge_types, positions=conformer,
                                         atom_decoder=self.dataset_infos.atom_decoder, 
                                         pharma_feat=pharma_feat, pharma_coord=pharma_coord)
-            
+
+            is_valid_valence = self.validate_chemical_valence(mol.rdkit_mol)
+            if not is_valid_valence:
+                mol.validity = 0
             molecule_list.append(mol)
 
               
@@ -999,4 +1002,16 @@ class FullDenoisingDiffusion(pl.LightningModule):
             mols_pharma_list.append((mol.rdkit_mol, pharmacophore))
         
         with open("mols_pharma_list.pkl", "wb") as f:
-            pickle.dump(mols_pharma_list, f)            
+            pickle.dump(mols_pharma_list, f)           
+
+    def validate_chemical_valence(self, rdkit_mol):
+        """Checks if any carbon atoms in the molecule violate standard valence rules."""
+        if rdkit_mol is None: return False
+        try:
+            rdkit_mol.UpdatePropertyCache(strict=False)
+            for atom in rdkit_mol.GetAtoms():
+                if atom.GetSymbol() == 'C' and atom.GetExplicitValence() > 4:
+                    return False
+            return True
+        except:
+            return False
