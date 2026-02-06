@@ -2,8 +2,6 @@ import os
 
 # =============================================================================
 # PLINDER CONFIGURATION
-# These environment variables must be set BEFORE importing plinder.core
-# "v2" is the full 2024-06 release. Use "tutorial" only for small-scale testing.
 # =============================================================================
 os.environ["PLINDER_RELEASE"] = "2024-06"
 os.environ["PLINDER_ITERATION"] = "v2" 
@@ -63,11 +61,9 @@ class PlinderGraphDataset(Dataset):
 
         try:
             # 2. Load System (Triggers download if not cached)
-            # MUST use keyword argument for system_id in v2 API
             ps = PlinderSystem(system_id=system_id)
 
-            # 3. Access Components via the .system property (v2 Structure)
-            # PLINDER v2 separates metadata from physical system components
+            # 3. Access Components via the .system property 
             system_obj = ps.system
             
             if system_obj is None:
@@ -78,12 +74,10 @@ class PlinderGraphDataset(Dataset):
             if not ligand_list:
                 return None
             
-            # Grab the first ligand's RDKit molecule (PharmaDiff assumes single ligand context)
-            # The property is .rdkit_mol (wrapper around the actual RDKit object)
+            # Grab the first ligand's RDKit molecule 
             ligand_mol = ligand_list[0].rdkit_mol
 
             # Receptor: ps.system.receptor is the receptor object
-            # .structure gives the Biotite AtomArray
             receptor_struct = system_obj.receptor.structure
 
             if ligand_mol is None or receptor_struct is None:
@@ -171,12 +165,17 @@ class PlinderGraphDataset(Dataset):
             'affinity': torch.cat(affinities, dim=0)
         }
 
-    def _encode_protein_atoms(self, atoms):
+    def _encode_protein_atoms(self, atoms, residue_names):
         # Basic One-Hot encoding for protein residues/atoms
         mapping = {'C': 0, 'N': 1, 'O': 2, 'S': 3}
-        feats = torch.zeros((len(atoms), 5)) # 5th slot is "Other"
-        for i, atom in enumerate(atoms):
+        # Residue properties (example: simplified hydrophobicity scale)
+        hydrophobic_res = {'ALA', 'VAL', 'LEU', 'ILE', 'PHE', 'TRP', 'MET'}
+        
+        feats = torch.zeros((len(atoms), 8)) # 4 atoms + 1 other + 1 hydrophobic + 2 charge
+        for i, (atom, res) in enumerate(zip(atoms, residue_names)):
             idx = mapping.get(atom, 4)
             feats[i, idx] = 1.0
+            if res in hydrophobic_res:
+                feats[i, 5] = 1.0
         return feats
 
