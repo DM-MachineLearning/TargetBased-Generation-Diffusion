@@ -587,6 +587,19 @@ class FullDenoisingDiffusion(pl.LightningModule):
         grads = torch.autograd.grad(energy, z_t_pos)[0]
 
         return grads
+
+    def calculate_physics_gradient(self, z_t_pos, pocket_pos, eps=0.1, sigma=2.0):
+        """
+        Calculates a differentiable Lennard-Jones potential gradient to maintain 
+        realistic inter-atomic distances between ligand and pocket.
+        """
+        z_t_pos.requires_grad_(True)
+        dists = torch.cdist(z_t_pos, pocket_pos)
+        # Lennard-Jones Potential: 4*eps * ((sigma/d)^12 - (sigma/d)^6)
+        ratio = sigma / (dists + 1e-6)
+        potential = torch.sum(4 * eps * (torch.pow(ratio, 12) - torch.pow(ratio, 6)))
+        grads = torch.autograd.grad(potential, z_t_pos)[0]
+        return grads
     
     def sample_zs_from_zt(self, z_t, s_int, test=False, sample_condition=None, guidance_scale=0.0):
         """
@@ -614,30 +627,30 @@ class FullDenoisingDiffusion(pl.LightningModule):
             grad_pos = torch.zeros_like(z_t_pos)
             grad_X = torch.zeros_like(z_t_X_hot)
             
-            if (self.affinity_model is not None and 
-                sample_condition is not None and 
-                guidance_scale > 0):
+            if (self.affinity_model is not None and sample_condition is not None and guidance_scale > 0):
+                # Ensemble Affinity Gradients
+                n_ensemble = 3
+                accumulated_grad_pos = torch.zeros_like(z_t_pos)
+                accumulated_grad_X = torch.zeros_like(z_t_X_hot)
 
-                # Predict Affinity
-                predicted_affinity = self.affinity_model(
-                    lig_pos=z_t_pos,
-                    lig_feat=z_t_X_hot, 
-                    prot_pos=sample_condition.pocket_pos,
-                    prot_feat=sample_condition.pocket_feat,
-                    t=s_int
-                )
-                
-                # Compute Gradients (Maximize Affinity)
-                grads = torch.autograd.grad(
-                    predicted_affinity.sum(), 
-                    [z_t_pos, z_t_X_hot],
-                    retain_graph=False
-                )
-                grad_pos = grads[0]
-                grad_X = grads[1]
+                for _ in range(n_ensemble):
+                    # Predict affinity
+                    predicted_affinity = self.affinity_model(
+                        lig_pos=z_t_pos, lig_feat=z_t_X_hot,
+                        prot_pos=sample_condition.pocket_pos,
+                        prot_feat=sample_condition.pocket_feat, t=s_int
+                    )
+                    # Compute Gradients (Maximize Affinity)
+                    grads = torch.autograd.grad(predicted_affinity.sum(), [z_t_pos, z_t_X_hot], retain_graph=True)
+                    accumulated_grad_pos += grads[0] / n_ensemble
+                    accumulated_grad_X += grads[1] / n_ensemble                
 
-                grad_clash = self.calculate_clash_gradient(z_t_pos, sample_condition.pocket_pos)
-                grad_pos = grad_pos - (grad_clash * 2.0) # Penalize clashes
+                grad_physics = self.calculate_physics_gradient(z_t_pos, sample_condition.pocket_pos)
+                grad_pos = accumulated_grad_pos - (grad_physics * 1.5)
+                grad_X = accumulated_grad_X
+
+                # grad_clash = self.calculate_clash_gradient(z_t_pos, sample_condition.pocket_pos)
+                # grad_pos = grad_pos - (grad_clash * 2.0) # Penalize clashes
 
         # 4. Compute Diffusion Parameters for the Step
         # We need these to calculate the Variance for scaling
