@@ -79,6 +79,51 @@ class PlinderGraphDataset(Dataset):
             print(f"Failed to load {system_id}: {e}")
             return None
 
+    def collate(self, data_list):
+        """
+        Custom collate function to handle variable-sized pockets and PyG ligands.
+        """
+        from torch_geometric.data import Batch
+        
+        # Filter Nones (failed loads)
+        data_list = [d for d in data_list if d is not None]
+        if len(data_list) == 0:
+            return None
+            
+        # 1. Batch Ligands (Standard PyG)
+        ligands = [d['ligand'] for d in data_list]
+        batched_ligand = Batch.from_data_list(ligands)
+        
+        # 2. Batch Pockets (Variable Size -> Flatten with Batch Index)
+        pocket_pos_list = []
+        pocket_feat_list = []
+        pocket_batch_list = []
+        affinities = []
+        
+        for i, data in enumerate(data_list):
+            pos = data['pocket_pos']
+            feat = data['pocket_feat']
+            
+            pocket_pos_list.append(pos)
+            pocket_feat_list.append(feat)
+            # Create a batch vector [i, i, i...] for this pocket
+            pocket_batch_list.append(torch.full((pos.shape[0],), i, dtype=torch.long))
+            affinities.append(data['affinity'])
+            
+        # Concatenate everything
+        batched_pocket_pos = torch.cat(pocket_pos_list, dim=0)
+        batched_pocket_feat = torch.cat(pocket_feat_list, dim=0)
+        batched_pocket_batch = torch.cat(pocket_batch_list, dim=0)
+        batched_affinity = torch.cat(affinities, dim=0)
+        
+        return {
+            'ligand': batched_ligand,
+            'pocket_pos': batched_pocket_pos,
+            'pocket_feat': batched_pocket_feat,
+            'pocket_batch': batched_pocket_batch, 
+            'affinity': batched_affinity
+        }
+
     def _encode_protein_atoms(self, atoms):
         # Helper to encode protein atoms for the EGNN
         mapping = {'C': 0, 'N': 1, 'O': 2, 'S': 3}
