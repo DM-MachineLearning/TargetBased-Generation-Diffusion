@@ -588,56 +588,132 @@ class FullDenoisingDiffusion(pl.LightningModule):
 
         return grads
     
-    def sample_zs_from_zt(self, z_t, s_int, test = False, sample_condition=None, guidance_scale=0.0):
-        """Samples from zs ~ p(zs | zt). Only used during sampling.
-           if last_step, return the graph prediction as well"""
-        # t = s_int[0, 0].item()
+    def sample_zs_from_zt(self, z_t, s_int, test=False, sample_condition=None, guidance_scale=0.0):
+        """
+        Samples zs ~ p(zs | zt) with Affinity Guidance.
+        Implements Diffleop-style guidance for both Continuous (Pos) and Discrete (Type) data.
+        """
+        # 1. Standard Prediction from the Generative Model
         extra_data = self.extra_features(z_t)
-        # if t == 0:
-        #     pred = self.forward(z_t, extra_data, samples=5)
-        #     return pred
-        # else:
         pred = self.forward(z_t, extra_data)
-        z_s = self.noise_model.sample_zs_from_zt_and_pred(z_t=z_t, pred=pred, s_int=s_int)
 
-        if (self.affinity_model is not None and 
-            sample_condition is not None and 
-            hasattr(sample_condition, 'pocket_pos') and 
-            guidance_scale > 0):
+        # 2. Prepare for Guidance Calculation
+        # We need gradients, so we must enable grad on inputs even during inference
+        with torch.enable_grad():
+            # A. Continuous State (Positions)
+            z_t_pos = z_t.pos.detach().clone().requires_grad_(True)
             
-            current_t = s_int[0].item()
+            # B. Discrete State (Atom Types & Edges) - Convert to Soft One-Hot
+            # This allows us to get gradients w.r.t "changing an atom type"
+            # z_t.X is indices (B, N). Convert to (B, N, num_types)
+            n_atom_types = self.dataset_infos.input_dims.X
+            z_t_X_hot = F.one_hot(z_t.X, num_classes=n_atom_types).float().detach().requires_grad_(True)
+            
+            # 3. Calculate Affinity Gradients
+            # Only run if guidance is active and we have a pocket condition
+            grad_pos = torch.zeros_like(z_t_pos)
+            grad_X = torch.zeros_like(z_t_X_hot)
+            
+            if (self.affinity_model is not None and 
+                sample_condition is not None and 
+                guidance_scale > 0):
 
-            # Heuristic: 
-            # - T=1000 (Pure Noise): No guidance (let it explore)
-            # - T=500  (Formation): Peak guidance (shape the molecule)
-            # - T=0    (Finalizing): No guidance (preserve precise bond lengths)
-            if current_t > 900 or current_t < 5:
-                effective_scale = 0.0
-            else:
-                effective_scale = guidance_scale
-
-            if effective_scale > 0:
-                z_t_pos = z_t.pos.detach().clone().requires_grad_(True)
+                # Predict Affinity
                 predicted_affinity = self.affinity_model(
                     lig_pos=z_t_pos,
-                    lig_feat=z_t.X, # Atom types
+                    lig_feat=z_t_X_hot, 
                     prot_pos=sample_condition.pocket_pos,
                     prot_feat=sample_condition.pocket_feat,
                     t=s_int
                 )
-
-                grad_affinity = torch.autograd.grad(predicted_affinity.sum(), z_t_pos)[0]
-
-                clash_scale = guidance_scale * 2.0
-                grad_clash = self.calculate_clash_gradient(
-                    z_t_pos,
-                    sample_condition.pocket_pos,
-                    threshold=1.5
-                )
-                total_grad = (effective_scale * grad_affinity) - (clash_scale * grad_clash)
-                total_grad = torch.clamp(total_grad, -1.0, 1.0)  
                 
-                z_s.pos = z_s.pos + total_grad
+                # Compute Gradients (Maximize Affinity)
+                grads = torch.autograd.grad(
+                    predicted_affinity.sum(), 
+                    [z_t_pos, z_t_X_hot],
+                    retain_graph=False
+                )
+                grad_pos = grads[0]
+                grad_X = grads[1]
+
+                grad_clash = self.calculate_clash_gradient(z_t_pos, sample_condition.pocket_pos)
+                grad_pos = grad_pos - (grad_clash * 2.0) # Penalize clashes
+
+        # 4. Compute Diffusion Parameters for the Step
+        # We need these to calculate the Variance for scaling
+        t_int = z_t.t_int
+        Qtb = self.noise_model.get_Qt_bar(t_int)
+        Qsb = self.noise_model.get_Qt_bar(s_int)
+        Qt = self.noise_model.get_Qt(t_int)
+        
+        # Calculate Variance (sigma_t_given_s) for Position Scaling
+        # Diffleop Eq 22: scale gradient by variance to avoid breaking structure at low t
+        gamma_t = self.noise_model.get_gamma_bar(t_int=t_int, key='p')
+        gamma_s = self.noise_model.get_gamma_bar(t_int=s_int, key='p')
+        _, sigma_t_given_s, _ = diffusion_utils.sigma_and_alpha_t_given_s(gamma_t, gamma_s, z_t.pos.shape)
+        
+        # 5. Apply Guidance to POSITIONS (Continuous)
+        # Update Rule: mean = mean + s * variance * grad
+        # Retrieve the standard posterior mean first
+        prob_true = diffusion_utils.posterior_distributions(
+            clean_data=pred, 
+            noisy_data=z_t,
+            Qt=Qt, Qsb=Qsb, Qtb=Qtb
+        )
+        
+        # Calculate standard position mean (mu)
+        # Note: This logic mirrors the internal calculation in noise_model.sample_zs_from_zt_and_pred
+        # We reconstruct it here to inject guidance.
+        nm = self.noise_model
+        alpha_t_bar = nm.get_alpha_bar(t_int=t_int, key='p')
+        alpha_s_bar = nm.get_alpha_bar(t_int=s_int, key='p')
+        sigma_t_bar = nm.get_sigma_bar(t_int=t_int, key='p')
+        sigma_s_bar = nm.get_sigma_bar(t_int=s_int, key='p')
+        
+        # Standard Diffusion Posterior Mean Formula
+        # mu = (alpha_s_bar * (1 - alpha_t_bar**2) * z_0 + alpha_t_bar * (1 - alpha_s_bar**2) * z_t) / (1 - alpha_t_bar**2)
+        # Simplified using coefficients:
+        coeff1 = (alpha_s_bar * sigma_t_bar**2) / (sigma_t_bar**2) # Simplified
+        
+        z_s = self.noise_model.sample_zs_from_zt_and_pred(z_t=z_t, pred=pred, s_int=s_int)
+        
+        # Apply Position Guidance
+        # We modify the SAMPLED z_s directly, effectively shifting the mean
+        # Shift = scale * variance * gradient
+        variance_scale = sigma_t_given_s ** 2 
+        pos_shift = guidance_scale * variance_scale * grad_pos
+        z_s.pos = z_s.pos + pos_shift
+
+        # 6. Apply Guidance to ATOM TYPES (Discrete)
+        # Update Rule: log_prob = log_prob + scale * gradient
+        # Diffleop Eq 23
+        
+        # 'prob_true.X' contains the posterior probabilities p(x_s | x_t, x_0)
+        # Shape: (B, N, n_types)
+        posterior_probs_X = prob_true.X
+        
+        # Convert to logits to add gradient safely
+        posterior_logits_X = torch.log(posterior_probs_X + 1e-10)
+        
+        # Add Guidance
+        # gradient tells us which type increases affinity
+        posterior_logits_X = posterior_logits_X + (guidance_scale * grad_X)
+        
+        # Renormalize to get valid probabilities
+        new_probs_X = F.softmax(posterior_logits_X, dim=-1)
+        
+        # Re-Sample Discrete States using new probabilities
+        # We rely on diffusion_utils to handle the masking and sampling details
+        z_s_discrete = diffusion_utils.sample_discrete_features(
+            probX=new_probs_X,
+            probE=prob_true.E, # We didn't guide edges, but could similarly
+            prob_charges=prob_true.charges,
+            node_mask=z_t.node_mask
+        )
+        
+        # Update the return object with guided discrete choices
+        z_s.X = z_s_discrete.X
+        # (Edges and charges remain as sampled by default unless you guide them too)
 
         return z_s
 
