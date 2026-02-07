@@ -37,7 +37,7 @@ from pharmadiff.metrics.molecular_metrics import TrainMolecularMetrics, Sampling
 from pharmadiff.diffusion.extra_features import ExtraFeatures
 from pharmadiff.analysis.rdkit_functions import Molecule
 from pharmadiff.datasets.adaptive_loader import effective_batch_size
-from pharmadiff.models.affinity_predictor import AffinityPredictor
+from pharmadiff.models.affinity_predictor import TimeAwareAffinityPredictor
 
 class FullDenoisingDiffusion(pl.LightningModule):
     model_dtype = torch.float32
@@ -680,7 +680,10 @@ class FullDenoisingDiffusion(pl.LightningModule):
                     predicted_affinity = self.affinity_model(
                         lig_pos=z_t_pos, lig_feat=z_t_X_hot,
                         prot_pos=sample_condition.pocket_pos,
-                        prot_feat=sample_condition.pocket_feat, t=s_int
+                        prot_feat=sample_condition.pocket_feat,
+                        t=s_int,
+                        lig_mask=z_t.node_mask,
+                        prot_batch=getattr(sample_condition, "pocket_batch", None),
                     )
                     # Compute Gradients (Maximize Affinity)
                     grads = torch.autograd.grad(predicted_affinity.sum(), [z_t_pos, z_t_X_hot], retain_graph=True)
