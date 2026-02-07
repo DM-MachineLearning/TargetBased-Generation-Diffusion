@@ -94,6 +94,9 @@ def to_dense(data, dataset_info, device=None):
     valid_rows = (pharma_sum > 0) & (pharma_sum < node_sum)
     
     pharma_E = get_frag_edges(pharma_mask, E)
+    pocket_pos = data.get('pocket_pos') if isinstance(data, dict) else None
+    pocket_feat = data.get('pocket_feat') if isinstance(data, dict) else None
+    pocket_batch = data.get('pocket_batch') if isinstance(data, dict) else None
 
     if device is not None:
         X = X.to(device)
@@ -109,13 +112,32 @@ def to_dense(data, dataset_info, device=None):
         pharma_charge = pharma_charge.to(device)
         pharma_atom_pos = pharma_atom_pos.to(device)
         pharma_E = pharma_E.to(device)
+        if pocket_pos is not None:
+            pocket_pos = pocket_pos.to(device)
+        if pocket_feat is not None:
+            pocket_feat = pocket_feat.to(device)
+        if pocket_batch is not None:
+            pocket_batch = pocket_batch.to(device)
 
-    data = PlaceHolder(X=X[valid_rows], charges=charges[valid_rows], pos=pos[valid_rows], E=E[valid_rows], y=y[valid_rows],  
-                       node_mask=node_mask[valid_rows], 
-                       pharma_feat=pharma_feat[valid_rows], pharma_coord= pharma_coord[valid_rows], 
-                       pharma_mask=pharma_mask[valid_rows], pharma_atom=pharma_atom[valid_rows], 
-                       pharma_atom_pos=pharma_atom_pos[valid_rows], pharma_E=pharma_E[valid_rows], 
-                       pharma_charge=pharma_charge[valid_rows])
+    data = PlaceHolder(
+        X=X[valid_rows],
+        charges=charges[valid_rows],
+        pos=pos[valid_rows],
+        E=E[valid_rows],
+        y=y[valid_rows],
+        node_mask=node_mask[valid_rows],
+        pharma_feat=pharma_feat[valid_rows],
+        pharma_coord=pharma_coord[valid_rows],
+        pharma_mask=pharma_mask[valid_rows],
+        pharma_atom=pharma_atom[valid_rows],
+        pharma_atom_pos=pharma_atom_pos[valid_rows],
+        pharma_E=pharma_E[valid_rows],
+        pharma_charge=pharma_charge[valid_rows],
+        pocket_pos=pocket_pos,
+        pocket_feat=pocket_feat,
+        pocket_batch=pocket_batch,
+    )
+
     return data.mask()
 
 
@@ -133,9 +155,29 @@ def get_frag_edges(pharma_mask, edges):
         
 
 class PlaceHolder:
-    def __init__(self, pos, X, charges, E, y, pharma_feat=None, pharma_coord=None, 
-                 t_int=None, t=None, node_mask=None, pharma_mask=None, pharma_atom=None, 
-                 pharma_atom_pos=None, pharma_E=None, pharma_charge=None):
+    def __init__(
+        self,
+        pos,
+        X,
+        charges,
+        E,
+        y,
+        pharma_feat=None,
+        pharma_coord=None,
+        t_int=None,
+        t=None,
+        node_mask=None,
+        pharma_mask=None,
+        pharma_atom=None,
+        pharma_atom_pos=None,
+        pharma_E=None,
+        pharma_charge=None,
+        pocket_pos=None,
+        pocket_feat=None,
+        pocket_batch=None,
+        ref_ligand_pos=None,
+        ref_ligand_atom_types=None,
+    ):
         self.pos = pos
         self.X = X
         self.charges = charges
@@ -150,7 +192,12 @@ class PlaceHolder:
         self.pharma_atom = pharma_atom
         self.pharma_charge = pharma_charge
         self.pharma_atom_pos = pharma_atom_pos  
-        self.pharma_E = pharma_E      
+        self.pharma_E = pharma_E
+        self.pocket_pos = pocket_pos
+        self.pocket_feat = pocket_feat
+        self.pocket_batch = pocket_batch
+        self.ref_ligand_pos = ref_ligand_pos
+        self.ref_ligand_atom_types = ref_ligand_atom_types
 
     def device_as(self, x: torch.Tensor):
         """ Changes the device and dtype of X, E, y. """
@@ -165,7 +212,13 @@ class PlaceHolder:
         self.pharma_atom = self.pharma_atom.to(x.device) if self.pharma_atom is not None else None
         self.pharma_atom_pos = self.pharma_atom_pos.to(x.device) if self.pharma_atom_pos is not None else None
         self.pharma_E = self.pharma_E.to(x.device) if self.pharma_E is not None else None
-
+        self.pocket_pos = self.pocket_pos.to(x.device) if self.pocket_pos is not None else None
+        self.pocket_feat = self.pocket_feat.to(x.device) if self.pocket_feat is not None else None
+        self.pocket_batch = self.pocket_batch.to(x.device) if self.pocket_batch is not None else None
+        self.ref_ligand_pos = self.ref_ligand_pos.to(x.device) if self.ref_ligand_pos is not None else None
+        self.ref_ligand_atom_types = (
+            self.ref_ligand_atom_types.to(x.device) if self.ref_ligand_atom_types is not None else None
+        )
         return self
 
     def mask(self, node_mask=None):
@@ -230,10 +283,28 @@ class PlaceHolder:
 
 
     def copy(self):
-        return PlaceHolder(X=self.X, charges=self.charges, E=self.E, y=self.y, pos=self.pos, t_int=self.t_int, t=self.t,
-                           node_mask=self.node_mask, pharma_coord=self.pharma_coord, pharma_feat=self.pharma_feat, 
-                           pharma_mask=self.pharma_mask, pharma_atom=self.pharma_atom, pharma_atom_pos=self.pharma_atom_pos, 
-                           pharma_E=self.pharma_E, pharma_charge=self.pharma_charge)
+        return PlaceHolder(
+            X=self.X,
+            charges=self.charges,
+            E=self.E,
+            y=self.y,
+            pos=self.pos,
+            t_int=self.t_int,
+            t=self.t,
+            node_mask=self.node_mask,
+            pharma_coord=self.pharma_coord,
+            pharma_feat=self.pharma_feat,
+            pharma_mask=self.pharma_mask,
+            pharma_atom=self.pharma_atom,
+            pharma_atom_pos=self.pharma_atom_pos,
+            pharma_E=self.pharma_E,
+            pharma_charge=self.pharma_charge,
+            pocket_pos=self.pocket_pos,
+            pocket_feat=self.pocket_feat,
+            pocket_batch=self.pocket_batch,
+            ref_ligand_pos=self.ref_ligand_pos,
+            ref_ligand_atom_types=self.ref_ligand_atom_types,
+        )
 
 
 def setup_wandb(cfg):

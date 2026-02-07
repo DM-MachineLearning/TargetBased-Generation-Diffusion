@@ -69,8 +69,23 @@ margin1, margin2, margin3 = 3, 2, 1
 
 
 class Molecule:
-    def __init__(self, atom_types, bond_types, positions, charges, atom_decoder, pharma_coord=None, pharma_feat=None, 
-                 validity =None, connected=None, match_score=None):
+    def __init__(
+        self,
+        atom_types,
+        bond_types,
+        positions,
+        charges,
+        atom_decoder,
+        pharma_coord=None,
+        pharma_feat=None,
+        validity=None,
+        connected=None,
+        match_score=None,
+        pocket_pos=None,
+        pocket_feat=None,
+        ref_ligand_pos=None,
+        ref_ligand_atom_types=None,
+    ):
         """ atom_types: n      LongTensor
             charges: n         LongTensor
             bond_types: n x n  LongTensor
@@ -98,6 +113,10 @@ class Molecule:
         self.validity = validity
         self.connected = connected
         self.match_score = match_score
+        self.pocket_pos = pocket_pos
+        self.pocket_feat = pocket_feat
+        self.ref_ligand_pos = ref_ligand_pos
+        self.ref_ligand_atom_types = ref_ligand_atom_types
 
     def build_molecule(self, atom_decoder, verbose=False):
         """ If positions is None,

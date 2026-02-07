@@ -14,6 +14,61 @@ import pharmadiff.utils as utils
 from pharmadiff.diffusion import diffusion_utils
 from pharmadiff.models.layers import Xtoy, Etoy, SE3Norm, PositionsMLP, masked_softmax, EtoX, SetNorm, GraphNorm
 
+class ConditioningFusion(nn.Module):
+    def __init__(self, cond_dim: int, fusion_type: str = "concat") -> None:
+        super().__init__()
+        self.cond_dim = cond_dim
+        self.fusion_type = fusion_type
+        self.pocket_proj = nn.LazyLinear(cond_dim)
+        if fusion_type == "concat":
+            self.fuse_proj = nn.Linear(cond_dim * 2, cond_dim)
+        elif fusion_type == "gated":
+            self.gate_proj = nn.Linear(cond_dim * 2, cond_dim)
+        elif fusion_type == "cross-attn":
+            self.attn = nn.MultiheadAttention(cond_dim, num_heads=1, batch_first=True)
+            self.attn_norm = nn.LayerNorm(cond_dim)
+        else:
+            raise ValueError(f"Unknown fusion_type: {fusion_type}")
+
+    def _pool_pocket(self, pocket_feat: torch.Tensor, pocket_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        if pocket_mask is None:
+            return pocket_feat.mean(dim=1, keepdim=True)
+        masked_feat = pocket_feat * pocket_mask.unsqueeze(-1)
+        denom = pocket_mask.sum(dim=1, keepdim=True).clamp(min=1).unsqueeze(-1)
+        return masked_feat.sum(dim=1, keepdim=True) / denom
+
+    def forward(
+        self,
+        pharma_feat: torch.Tensor,
+        pocket_feat: Optional[torch.Tensor] = None,
+        pocket_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if pocket_feat is None:
+            return pharma_feat
+
+        pocket_feat_proj = self.pocket_proj(pocket_feat)
+
+        if self.fusion_type == "concat":
+            pocket_summary = self._pool_pocket(pocket_feat_proj, pocket_mask)
+            pocket_summary = pocket_summary.expand(pharma_feat.size(0), pharma_feat.size(1), -1)
+            return self.fuse_proj(torch.cat([pharma_feat, pocket_summary], dim=-1))
+
+        if self.fusion_type == "gated":
+            pocket_summary = self._pool_pocket(pocket_feat_proj, pocket_mask)
+            pocket_summary = pocket_summary.expand(pharma_feat.size(0), pharma_feat.size(1), -1)
+            gate = torch.sigmoid(self.gate_proj(torch.cat([pharma_feat, pocket_summary], dim=-1)))
+            return gate * pharma_feat + (1 - gate) * pocket_summary
+
+        if pocket_mask is not None:
+            valid_counts = pocket_mask.sum(dim=1)
+            if (valid_counts == 0).any():
+                return pharma_feat
+            key_padding_mask = ~pocket_mask
+        else:
+            key_padding_mask = None
+
+        attn_out, _ = self.attn(pharma_feat, pocket_feat_proj, pocket_feat_proj, key_padding_mask=key_padding_mask)
+        return self.attn_norm(pharma_feat + attn_out)
 
 class XEyTransformerLayer(nn.Module):
     """ Transformer that updates node, edge and global features
@@ -428,7 +483,7 @@ class GraphTransformer(nn.Module):
     dims : dict -- contains dimensions for each feature type
     """
     def __init__(self, input_dims: utils.PlaceHolder, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict,
-                 output_dims: utils.PlaceHolder):
+                 output_dims: utils.PlaceHolder, conditioning_fusion: str = "concat"):
         super().__init__()
         self.n_layers = n_layers
         self.out_dim_X = output_dims.X
@@ -437,6 +492,10 @@ class GraphTransformer(nn.Module):
         self.out_dim_charges = output_dims.charges
         self.input_dims = input_dims
         self.outdim = output_dims
+        self.conditioning_fusion = ConditioningFusion(
+            cond_dim=input_dims.pharma_feat,
+            fusion_type=conditioning_fusion,
+        )
 
         act_fn_in = nn.ReLU()
         act_fn_out = nn.ReLU()
@@ -493,11 +552,17 @@ class GraphTransformer(nn.Module):
         
         #X_masked = torch.where(data.pharma_mask.unsqueeze(-1) > 0, data.pharma_atom, X)
         
-        X_all = torch.cat((X, data.pharma_feat), dim = -1)
+        fused_pharma_feat = self.conditioning_fusion(
+            data.pharma_feat,
+            pocket_feat=data.pocket_feat,
+            pocket_mask=data.pocket_mask,
+        )
+
+        X_all = torch.cat((X, fused_pharma_feat), dim = -1)
         
         
         
-        feats_x = torch.cat((data.pharma_atom, data.pharma_charge, data.pharma_feat), dim = -1)
+        feats_x = torch.cat((data.pharma_atom, data.pharma_charge, fused_pharma_feat), dim = -1)
         feats_atoms = self.mlp_in_pharma_atoms(feats_x) * p_mask
         
 

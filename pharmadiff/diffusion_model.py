@@ -12,6 +12,7 @@ from rdkit import Chem
 import pickle
 import random
 from torch_geometric.data import Batch
+from torch_geometric.utils import to_dense_batch
 
 
 from pharmadiff.metrics.pgmg_pharma_match_score import match_score
@@ -23,6 +24,12 @@ from pharmadiff.diffusion import diffusion_utils
 from pharmadiff.diffusion.diffusion_utils import mask_distributions, sum_except_batch
 from pharmadiff.metrics.train_metrics import TrainLoss
 from pharmadiff.metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
+from pharmadiff.metrics.pocket_metrics import (
+    compute_contact_map,
+    compute_contact_map_satisfaction,
+    compute_interaction_fingerprint,
+    compute_ifp_similarity,
+)
 from pharmadiff import utils
 import pharmadiff.analysis.visualization as visualizer
 import pharmadiff.metrics.abstract_metrics as custom_metrics
@@ -83,7 +90,8 @@ class FullDenoisingDiffusion(pl.LightningModule):
                                       n_layers=cfg.model.n_layers,
                                       hidden_mlp_dims=cfg.model.hidden_mlp_dims,
                                       hidden_dims=cfg.model.hidden_dims,
-                                      output_dims=self.output_dims)
+                                      output_dims=self.output_dims,
+                                      conditioning_fusion=getattr(cfg.model, "conditioning_fusion", "concat"))
 
         if cfg.model.transition == 'uniform':
             self.noise_model = DiscreteUniformTransition(output_dims=self.output_dims,
@@ -125,12 +133,17 @@ class FullDenoisingDiffusion(pl.LightningModule):
         pred = self.forward(z_t, extra_data)
         loss, tl_log_dict = self.train_loss(masked_pred=pred, masked_true=dense_data,
                                             log=i % self.log_every_steps == 0)
+        aux_loss, aux_log_dict = self.compute_interaction_aux_loss(pred, data)
+        if aux_loss is not None:
+            loss = loss + aux_loss
 
         # if self.local_rank == 0:
         tm_log_dict = self.train_metrics(masked_pred=pred, masked_true=dense_data,
                                          log=i % self.log_every_steps == 0)
         if tl_log_dict is not None:
             self.log_dict(tl_log_dict, batch_size=self.BS)
+        if aux_log_dict is not None:
+            self.log_dict(aux_log_dict, batch_size=self.BS)
         if tm_log_dict is not None:
             self.log_dict(tm_log_dict, batch_size=self.BS)
         return loss
@@ -244,6 +257,9 @@ class FullDenoisingDiffusion(pl.LightningModule):
             condition_subset = utils.to_dense(condition, self.dataset_infos, device=self.device)
             
             for i in range(len(condition_subset.X)):
+                ref_mask = condition_subset.node_mask[i]
+                ref_ligand_pos = condition_subset.pos[i, ref_mask]
+                ref_ligand_atom_types = torch.argmax(condition_subset.X[i, ref_mask], dim=-1)
                 
                 condition = utils.PlaceHolder(X=None, charges=None, E=None, y=None,
                                                  pos= None, node_mask=None,
@@ -253,7 +269,12 @@ class FullDenoisingDiffusion(pl.LightningModule):
                                                  pharma_atom=condition_subset.pharma_atom[i],
                                                  pharma_atom_pos=condition_subset.pharma_atom_pos[i],
                                                  pharma_E=condition_subset.pharma_E[i],
-                                                 pharma_charge=condition_subset.pharma_charge[i])
+                                                 pharma_charge=condition_subset.pharma_charge[i],
+                                                 pocket_pos=condition_subset.pocket_pos,
+                                                 pocket_feat=condition_subset.pocket_feat,
+                                                 pocket_batch=condition_subset.pocket_batch,
+                                                 ref_ligand_pos=ref_ligand_pos,
+                                                 ref_ligand_atom_types=ref_ligand_atom_types)
                 
                 samples_i = self.sample_n_graphs(self.test_dense_data, samples_to_generate=self.test_sampling_num_per_graph,
                                                 chains_to_save=self.cfg.general.final_model_chains_to_save,
@@ -290,6 +311,9 @@ class FullDenoisingDiffusion(pl.LightningModule):
             
             for i in range(self.cfg.general.final_model_samples_to_generate):
                 print(f"Sampling for mol with index {i}")
+                ref_mask = condition_subset.node_mask[i]
+                ref_ligand_pos = condition_subset.pos[i, ref_mask]
+                ref_ligand_atom_types = torch.argmax(condition_subset.X[i, ref_mask], dim=-1)
                 
                 condition = utils.PlaceHolder(X=None, charges=None, E=None, y=None,
                                                  pos= None, node_mask=None,
@@ -299,7 +323,12 @@ class FullDenoisingDiffusion(pl.LightningModule):
                                                  pharma_atom=condition_subset.pharma_atom[i],
                                                  pharma_atom_pos=condition_subset.pharma_atom_pos[i],
                                                  pharma_E=condition_subset.pharma_E[i],
-                                                 pharma_charge=condition_subset.pharma_charge[i])
+                                                 pharma_charge=condition_subset.pharma_charge[i],
+                                                 pocket_pos=condition_subset.pocket_pos,
+                                                 pocket_feat=condition_subset.pocket_feat,
+                                                 pocket_batch=condition_subset.pocket_batch,
+                                                 ref_ligand_pos=ref_ligand_pos,
+                                                 ref_ligand_atom_types=ref_ligand_atom_types)
                 
                 samples_i = self.sample_n_graphs(self.test_dense_data, samples_to_generate=self.test_sampling_num_per_graph,
                                                 chains_to_save=self.cfg.general.final_model_chains_to_save,
@@ -524,6 +553,13 @@ class FullDenoisingDiffusion(pl.LightningModule):
         
 
         molecule_list = []
+        pocket_pos = getattr(sample_condition, "pocket_pos", None) if sample_condition is not None else None
+        pocket_feat = getattr(sample_condition, "pocket_feat", None) if sample_condition is not None else None
+        pocket_batch = getattr(sample_condition, "pocket_batch", None) if sample_condition is not None else None
+        ref_ligand_pos = getattr(sample_condition, "ref_ligand_pos", None) if sample_condition is not None else None
+        ref_ligand_atom_types = (
+            getattr(sample_condition, "ref_ligand_atom_types", None) if sample_condition is not None else None
+        )
         for i in range(batch_size):
             mask = node_mask[i]  # Boolean mask for the nodes
             p_mask = pharma_mask[i]
@@ -534,10 +570,38 @@ class FullDenoisingDiffusion(pl.LightningModule):
             edge_types = E[i, mask][:, mask]  # Apply the mask for rows and columns
             conformer = pos[i, mask]
             
-            mol = Molecule(atom_types=atom_types, charges=charge_vec,
-                                        bond_types=edge_types, positions=conformer,
-                                        atom_decoder=self.dataset_infos.atom_decoder, 
-                                        pharma_feat=pharma_feat, pharma_coord=pharma_coord)
+            if pocket_pos is not None and pocket_batch is not None:
+                pocket_mask = pocket_batch == i
+                pocket_pos_i = pocket_pos[pocket_mask]
+                pocket_feat_i = pocket_feat[pocket_mask] if pocket_feat is not None else None
+            else:
+                pocket_pos_i = pocket_pos
+                pocket_feat_i = pocket_feat
+
+            if ref_ligand_pos is not None and ref_ligand_atom_types is not None:
+                if ref_ligand_pos.dim() == 3:
+                    ref_pos_i = ref_ligand_pos[i]
+                    ref_types_i = ref_ligand_atom_types[i]
+                else:
+                    ref_pos_i = ref_ligand_pos
+                    ref_types_i = ref_ligand_atom_types
+            else:
+                ref_pos_i = None
+                ref_types_i = None
+
+            mol = Molecule(
+                atom_types=atom_types,
+                charges=charge_vec,
+                bond_types=edge_types,
+                positions=conformer,
+                atom_decoder=self.dataset_infos.atom_decoder,
+                pharma_feat=pharma_feat,
+                pharma_coord=pharma_coord,
+                pocket_pos=pocket_pos_i,
+                pocket_feat=pocket_feat_i,
+                ref_ligand_pos=ref_pos_i,
+                ref_ligand_atom_types=ref_types_i,
+            )
 
             mol.valence_valid = self.validate_chemical_valence(mol.rdkit_mol)
             if not mol.valence_valid:
@@ -793,6 +857,54 @@ class FullDenoisingDiffusion(pl.LightningModule):
         model_input.y = torch.hstack((z_t.y, extra_data.y, z_t.t)).float()
         return self.model(model_input, samples= samples)
 
+    def compute_interaction_aux_loss(self, pred, data):
+        weight = getattr(self.cfg.train, "interaction_loss_weight", 0.0)
+        if weight <= 0:
+            return None, None
+        if not isinstance(data, dict):
+            return None, None
+        if "interaction_map" not in data:
+            return None, None
+        if "pocket_pos" not in data or "pocket_batch" not in data:
+            return None, None
+
+        target_map = data["interaction_map"]
+        if target_map is None:
+            return None, None
+
+        pocket_pos, pocket_mask = to_dense_batch(
+            x=data["pocket_pos"],
+            batch=data["pocket_batch"],
+        )
+        pocket_pos = pocket_pos.to(pred.pos.device)
+        pocket_mask = pocket_mask.to(pred.pos.device)
+
+        pred_pos = pred.pos
+        ligand_mask = pred.node_mask
+        dist_map = torch.cdist(pred_pos, pocket_pos)
+
+        base_mask = ligand_mask.unsqueeze(-1) & pocket_mask.unsqueeze(1)
+        interaction_mask = data.get("interaction_mask")
+        if interaction_mask is not None:
+            interaction_mask = interaction_mask.to(pred.pos.device)
+            base_mask = base_mask & interaction_mask.bool()
+
+        target_map = target_map.to(pred.pos.device)
+        if target_map.shape != dist_map.shape:
+            return None, None
+
+        if base_mask.sum() == 0:
+            return None, None
+
+        loss_map = (dist_map - target_map) ** 2
+        loss = (loss_map * base_mask).sum() / base_mask.sum().clamp(min=1)
+        weighted_loss = weight * loss
+        log_dict = {
+            "train_loss/interaction_map_mse": loss.detach(),
+            "train_loss/interaction_map_weighted": weighted_loss.detach(),
+        }
+        return weighted_loss, log_dict
+
     def on_train_epoch_end(self) -> None:
         self.print(f"Train epoch {self.current_epoch} ends")
         tle_log = self.train_loss.log_epoch_metrics()
@@ -855,7 +967,11 @@ class FullDenoisingDiffusion(pl.LightningModule):
     def select_best_molecule(self, sampled_list):
         best_molecules = []
         batch_size = sampled_list[0].X.size(0)
-        
+        pocket_pos = getattr(sampled_list[0], "pocket_pos", None)
+        pocket_feat = getattr(sampled_list[0], "pocket_feat", None)
+        pocket_batch = getattr(sampled_list[0], "pocket_batch", None)
+        ref_ligand_pos = getattr(sampled_list[0], "ref_ligand_pos", None)
+        ref_ligand_atom_types = getattr(sampled_list[0], "ref_ligand_atom_types", None)
         
         for i in range(len(sampled_list)):
             sampled_list[i] = sampled_list[i].collapse(self.dataset_infos.collapse_charges)
@@ -885,10 +1001,38 @@ class FullDenoisingDiffusion(pl.LightningModule):
                 edge_types = sampled_list[j].E[i, mask][:, mask]  # Apply the mask for rows and columns
                 conformer = sampled_list[j].pos[i, mask]
                 
-                mol = Molecule(atom_types=atom_types, charges=charge_vec,
-                                          bond_types=edge_types, positions=conformer,
-                                          atom_decoder=self.dataset_infos.atom_decoder, 
-                                          pharma_feat=pharma_feat, pharma_coord=pharma_coord)
+                if pocket_pos is not None and pocket_batch is not None:
+                    pocket_mask = pocket_batch == i
+                    pocket_pos_i = pocket_pos[pocket_mask]
+                    pocket_feat_i = pocket_feat[pocket_mask] if pocket_feat is not None else None
+                else:
+                    pocket_pos_i = pocket_pos
+                    pocket_feat_i = pocket_feat
+
+                if ref_ligand_pos is not None and ref_ligand_atom_types is not None:
+                    if ref_ligand_pos.dim() == 3:
+                        ref_pos_i = ref_ligand_pos[i]
+                        ref_types_i = ref_ligand_atom_types[i]
+                    else:
+                        ref_pos_i = ref_ligand_pos
+                        ref_types_i = ref_ligand_atom_types
+                else:
+                    ref_pos_i = None
+                    ref_types_i = None
+
+                mol = Molecule(
+                    atom_types=atom_types,
+                    charges=charge_vec,
+                    bond_types=edge_types,
+                    positions=conformer,
+                    atom_decoder=self.dataset_infos.atom_decoder,
+                    pharma_feat=pharma_feat,
+                    pharma_coord=pharma_coord,
+                    pocket_pos=pocket_pos_i,
+                    pocket_feat=pocket_feat_i,
+                    ref_ligand_pos=ref_pos_i,
+                    ref_ligand_atom_types=ref_types_i,
+                )
                 
                 mol_frags = Chem.rdmolops.GetMolFrags(mol.rdkit_mol, asMols=True, sanitizeFrags=False)
 
@@ -910,7 +1054,34 @@ class FullDenoisingDiffusion(pl.LightningModule):
                 except:
                     mol.match_score = -1
                     
-                scores.append(mol.validity + mol.match_score)
+                pocket_score = 0.0
+                if mol.pocket_pos is not None and mol.ref_ligand_pos is not None:
+                    ref_contacts = compute_contact_map(mol.ref_ligand_pos, mol.pocket_pos, cutoff=4.5)
+                    gen_contacts = compute_contact_map(mol.positions, mol.pocket_pos, cutoff=4.5)
+                    satisfaction = compute_contact_map_satisfaction(ref_contacts, gen_contacts)
+                    ref_ifp = compute_interaction_fingerprint(
+                        mol.ref_ligand_pos,
+                        mol.ref_ligand_atom_types,
+                        mol.pocket_pos,
+                        mol.pocket_feat,
+                        cutoff=4.5,
+                        num_ligand_types=len(self.dataset_infos.atom_decoder),
+                    )
+                    gen_ifp = compute_interaction_fingerprint(
+                        mol.positions,
+                        mol.atom_types,
+                        mol.pocket_pos,
+                        mol.pocket_feat,
+                        cutoff=4.5,
+                        num_ligand_types=len(self.dataset_infos.atom_decoder),
+                    )
+                    ifp_sim = compute_ifp_similarity(ref_ifp, gen_ifp)
+                    if satisfaction is not None:
+                        pocket_score += satisfaction
+                    if ifp_sim is not None:
+                        pocket_score += ifp_sim
+
+                scores.append(mol.validity + mol.match_score + pocket_score)
                 molecules.append(mol)
                 
             

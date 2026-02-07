@@ -20,6 +20,12 @@ from pharmadiff.utils import NoSyncMAE as MeanAbsoluteError
 from pharmadiff.metrics.metrics_utils import counter_to_tensor, wasserstein1d, total_variation1d
 from pharmadiff.metrics.rdkit_match_eval import match_mol, check_ring_filter, check_pains, calculateScore
 from pharmadiff.metrics.pgmg_pharma_match_score import match_score
+from pharmadiff.metrics.pocket_metrics import (
+    compute_contact_map,
+    compute_contact_map_satisfaction,
+    compute_interaction_fingerprint,
+    compute_ifp_similarity,
+)
 
 project_root = os.path.abspath(os.path.join(os.getcwd(), ".."))
 
@@ -70,6 +76,8 @@ class SamplingMetrics(nn.Module):
         self.pgmg_valid_percentage = MeanMetric()
         self.pgmg_valid_above_threshold = MeanMetric()
         self.rdkit_valid_pharma_match = MeanMetric()
+        self.pocket_contact_satisfaction = MeanMetric()
+        self.pocket_ifp_similarity = MeanMetric()
 
 
     def reset(self):
@@ -81,7 +89,7 @@ class SamplingMetrics(nn.Module):
                        self.rdkit_QED, self.ring_filter, self.pains_filter, self.pass_2d_filter, 
                        self.n_rings, self.pgmg_abobe_threshold,
                        self.rdkit_valid_pharma_match, self.pgmg_valid_match_score, self.pgmg_valid_percentage,
-                       self.pgmg_valid_above_threshold]:
+                       self.pgmg_valid_above_threshold, self.pocket_contact_satisfaction, self.pocket_ifp_similarity]:
             metric.reset()
 
     def compute_validity(self, generated):
@@ -182,6 +190,7 @@ class SamplingMetrics(nn.Module):
             self.pgmg_match_score_fn(generated)
             self.rdkit_valid_pharma_satisfaction(valid_mols, valid_rdkit_mols)
             self.pgmg_valid_match_score_fn(valid_mols, valid_rdkit_mols)
+            self.pocket_constraint_metrics(generated)
             rdkit_pharma_match = self.rdkit_pharma_match.compute()
             rdkit_SAS = self.rdkit_SAS.compute()
             rdkit_QED = self.rdkit_QED.compute()
@@ -197,6 +206,10 @@ class SamplingMetrics(nn.Module):
             pgmg_valid_percentage = self.pgmg_valid_percentage.compute()
             pgmg_valid_above_threshold = self.pgmg_valid_above_threshold.compute()
             rdkit_valid_pharma_match = self.rdkit_valid_pharma_match.compute()
+            pocket_contact_satisfaction = self.pocket_contact_satisfaction.compute()
+            pocket_ifp_similarity = self.pocket_ifp_similarity.compute()
+            pocket_contact_satisfaction = torch.nan_to_num(pocket_contact_satisfaction)
+            pocket_ifp_similarity = torch.nan_to_num(pocket_ifp_similarity)
          
 
             print(f"rdkit pharmacophore match: {rdkit_pharma_match * 100 :.2f}%")
@@ -213,6 +226,10 @@ class SamplingMetrics(nn.Module):
             print(f"pgmg valid pharmacophore match percentage: {pgmg_valid_percentage * 100 :.2f}%")
             print(f"pgmg valid pharmacophore match above 0.8: {pgmg_valid_above_threshold * 100 :.2f}%")
             print(f"rdkit valid pharmacophore match: {rdkit_valid_pharma_match * 100 :.2f}%")
+            if pocket_contact_satisfaction > 0:
+                print(f"Pocket contact satisfaction: {pocket_contact_satisfaction * 100 :.2f}%")
+            if pocket_ifp_similarity > 0:
+                print(f"Pocket interaction fingerprint similarity: {pocket_ifp_similarity * 100 :.2f}%")
          
             if wandb.run:
                 dic = {
@@ -225,7 +242,9 @@ class SamplingMetrics(nn.Module):
                     'n_rings': n_rings,
                     'pgmg_match_score': pgmg_match_score,
                     'pgmg_percentage': percentage_pgmg,
-                    'pgmg_abobe_threshold': pgmg_above_threshold
+                    'pgmg_abobe_threshold': pgmg_above_threshold,
+                    'pocket_contact_satisfaction': pocket_contact_satisfaction,
+                    'pocket_ifp_similarity': pocket_ifp_similarity
                     }
                 wandb.log(dic, commit=False)
         return all_smiles
@@ -307,7 +326,8 @@ class SamplingMetrics(nn.Module):
                   'sampling/ValencyW1': self.valency_w1.compute(),
                   'sampling/BondLengthsW1': self.bond_lengths_w1.compute(),
                   'sampling/AnglesW1': self.angles_w1.compute(),
-                  'sampling/valence_validity": avg_valence}
+                  'sampling/valence_validity': avg_valence
+                  }
         if local_rank == 0:
             print(f"Sampling metrics", {key: round(val.item(), 3) for key, val in to_log.items()})
 
@@ -535,7 +555,45 @@ class SamplingMetrics(nn.Module):
         self.pgmg_abobe_threshold.update(value= above_0_8_count /len(satisfied_percentage),
                                          weight=len(satisfied_percentage))
 
-        
+    def pocket_constraint_metrics(self, molecules, cutoff: float = 4.5):
+        contact_scores = []
+        ifp_scores = []
+
+        for mol in molecules:
+            if mol.pocket_pos is None or mol.ref_ligand_pos is None:
+                continue
+            ref_contacts = compute_contact_map(mol.ref_ligand_pos, mol.pocket_pos, cutoff=cutoff)
+            gen_contacts = compute_contact_map(mol.positions, mol.pocket_pos, cutoff=cutoff)
+            satisfaction = compute_contact_map_satisfaction(ref_contacts, gen_contacts)
+            if satisfaction is not None:
+                contact_scores.append(satisfaction)
+
+            ref_ifp = compute_interaction_fingerprint(
+                mol.ref_ligand_pos,
+                mol.ref_ligand_atom_types,
+                mol.pocket_pos,
+                mol.pocket_feat,
+                cutoff=cutoff,
+                num_ligand_types=len(self.dataset_infos.atom_decoder),
+            )
+            gen_ifp = compute_interaction_fingerprint(
+                mol.positions,
+                mol.atom_types,
+                mol.pocket_pos,
+                mol.pocket_feat,
+                cutoff=cutoff,
+                num_ligand_types=len(self.dataset_infos.atom_decoder),
+            )
+            ifp_similarity = compute_ifp_similarity(ref_ifp, gen_ifp)
+            if ifp_similarity is not None:
+                ifp_scores.append(ifp_similarity)
+
+        if contact_scores:
+            self.pocket_contact_satisfaction.update(
+                value=sum(contact_scores) / len(contact_scores), weight=len(contact_scores)
+            )
+        if ifp_scores:
+            self.pocket_ifp_similarity.update(value=sum(ifp_scores) / len(ifp_scores), weight=len(ifp_scores))
         
     def pgmg_valid_match_score_fn(self, valid_molecules, valid_rdkit_mols):
         satisfied_percentage = []
