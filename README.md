@@ -1,3 +1,26 @@
+Download the dataset: `python download_plinder.py`
+
+Use caching (although doesn't seem to work, or so): `python -m pharmadiff.scripts.precompute_plinder_stats dataset=plinder`
+
+Train: `python -m pharmadiff.main experiment=plinder dataset.use_sample_cache=True train.num_workers=4 train.n_epochs=2`
+
+Generation: "Find Out" (Having reached that stage yet:)
+
+### The current configuration is just to use the 1000 entries (hardcoded), and these can be changed. Many other fine-tune knobs also reside in configs/. Storage path can also be changed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # PharmaDiff: Pharmacophore-Conditioned Diffusion Model for De Novo Drug Design
 
 [Link to the paper]()
