@@ -23,7 +23,6 @@ class PlinderDataModule(LightningDataModule):
         if HydraConfig.initialized():
             self._original_cwd = get_original_cwd()
         else:
-            # Allow use from non-Hydra entrypoints (e.g., precompute scripts).
             self._original_cwd = str(Path.cwd())
         self._sample_cache_dir = self._resolve_path(getattr(cfg.dataset, "sample_cache_dir", "data/plinder/sample_cache"))
         self._statistics_cache_path = self._resolve_path(getattr(cfg.dataset, "statistics_cache_path", "data/plinder/statistics.pt"))

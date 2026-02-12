@@ -18,15 +18,13 @@ from rdkit import Chem
 from torch.utils.data import Dataset
 from torch_geometric.utils import to_dense_batch
 
-# Official PLINDER Imports
 from plinder.core import PlinderSystem
 from plinder.core.scores import query_index
 
-# PharmaDiff Imports (Ensure pharmadiff is in your PYTHONPATH)
 from pharmadiff.datasets.dataset_utils import mol_to_torch_geometric
 from pharmadiff.datasets.pharmacophore_utils import mol_to_torch_pharmacophore
 
-# Atom encoding for PharmaDiff (Must match your model config)
+# Atom encoding for PharmaDiff 
 ATOM_ENCODER = {'H': 0, 'B': 1, 'C': 2, 'N': 3, 'O': 4, 'F': 5, 'P': 6, 'S': 7, 'Cl': 8, 'Br': 9, 'I': 10, 'Fe': 11}
 
 _HYDROPHOBIC_RES = {'ALA', 'VAL', 'LEU', 'ILE', 'MET', 'PHE', 'TRP', 'PRO'}
@@ -44,7 +42,7 @@ _AFFINITY_CANDIDATE_COLUMNS = [
     "affinity_data.pki",
     "affinity_data.pIC50",
     "affinity_data.pchembl",
-    "ligand_binding_affinity",
+    # "ligand_binding_affinity",  // removed until bugfix
 ]
 
 _TRAINING_METADATA_FLOAT_COLUMNS = [
@@ -79,7 +77,7 @@ _TRAINING_METADATA_FLOAT_COLUMNS = [
 
 _TRAINING_METADATA_BOOL_COLUMNS = [
     "system_pass_validation_criteria",
-    "system_has_binding_affinity",
+    # "system_has_binding_affinity",   // removed until bugfix
     "ligand_is_proper",
     "ligand_is_lipinski",
     "ligand_is_fragment",
@@ -103,19 +101,6 @@ _TRAINING_METADATA_STR_COLUMNS = [
 ]
 
 class PlinderGraphDataset(Dataset):
-    """PLINDER dataset loader.
-
-    Output schema (per-sample):
-        ligand: PyG Data graph for ligand atoms/bonds.
-        pharmacophore: PyG Data graph for pharmacophore anchors/features.
-        pocket_pos: (N_pocket, 3) pocket atom coordinates.
-        pocket_feat: (N_pocket, 8) pocket interaction features.
-        pocket_residue_index: (N_pocket,) residue indices for reproducibility.
-        pocket_atom_index: (N_pocket,) atom indices for reproducibility.
-        pocket_residue_name: list[str] residue names for interpretability.
-        pocket_chain_id: list[str] chain IDs for interpretability.
-        affinity: (1,) binding affinity label (pKd).
-    """
 
     def __init__(
         self,
@@ -148,14 +133,7 @@ class PlinderGraphDataset(Dataset):
         sample_cache_version: str = "v1",
         transform=None,
         debug: bool = False,
-        limit: Optional[int] = None,
     ):
-        """
-        Args:
-            split (str): 'train', 'val', or 'test'
-            pocket_radius (float): Radius in Angstroms to crop protein context
-            transform (callable, optional): Optional transform to be applied on a sample.
-        """
         self.split = split
         self.pocket_radius = pocket_radius
         self.contact_cutoff = contact_cutoff
@@ -166,6 +144,7 @@ class PlinderGraphDataset(Dataset):
         self.pharmacophore_profile = pharmacophore_profile
         self.random_subset = random_subset
         self.max_entries = max_entries
+        self.min_affinity = min_affinity
         self.subset_seed = int(subset_seed)
         self.cluster_column = cluster_column
         self.allowed_clusters = list(allowed_clusters) if allowed_clusters is not None else None
@@ -178,11 +157,26 @@ class PlinderGraphDataset(Dataset):
         self.affinity_column = None
 
         print(f"--> Loading PLINDER index for split: {split}")
-        # Load only the requested split to reduce startup latency and metadata scanning overhead.
-        # columns=None fetches all available metadata for downstream filtering/labels.
-        self.index = query_index(columns=None, splits=[split]).reset_index(drop=True)
+        cols_to_load = set()
+        cols_to_load.add("system_id")
+        
+        cols_to_load.update(_TRAINING_METADATA_FLOAT_COLUMNS)
+        cols_to_load.update(_TRAINING_METADATA_BOOL_COLUMNS)
+        cols_to_load.update(_TRAINING_METADATA_STR_COLUMNS)
+        
+        if self.cluster_column:
+            cols_to_load.add(self.cluster_column)
 
-        # Resolve affinity source column across PLINDER schema variants.
+        if self.min_affinity is not None: # Ineffective for now, since it has been removed until bugfix
+             cols_to_load.update(_AFFINITY_CANDIDATE_COLUMNS)
+
+        cols_list = list(cols_to_load)
+        
+        print(f"--> Querying columns: {cols_list}")
+        
+        raw_index = query_index(columns=list(cols_to_load), splits=[split])
+        self.index = raw_index.sort_values("system_id").reset_index(drop=True)
+
         for col in _AFFINITY_CANDIDATE_COLUMNS:
             if col in self.index.columns:
                 self.affinity_column = col
@@ -286,7 +280,6 @@ class PlinderGraphDataset(Dataset):
 
         if max_collision_score is not None and 'system_ligand_has_cofactor_collision' in self.index.columns:
             before = len(self.index)
-            # Keep entries where collision score is absent or under threshold
             col = self.index['system_ligand_has_cofactor_collision']
             keep = col.isna() | (col.astype(float) <= max_collision_score)
             self.index = self.index[keep].reset_index(drop=True)
@@ -319,7 +312,8 @@ class PlinderGraphDataset(Dataset):
 
         if self.random_subset is not None and len(self.index) > int(self.random_subset):
             before = len(self.index)
-            self.index = self.index.sample(n=int(self.random_subset), random_state=self.subset_seed).reset_index(drop=True)
+            self.index = self.index.head(int(self.random_subset)).reset_index(drop=True) # to make it deterministic
+            # self.index = self.index.sample(n=int(self.random_subset), random_state=self.subset_seed).reset_index(drop=True)
             print(f"--> Applied random_subset={self.random_subset} (seed={self.subset_seed}): {before} -> {len(self.index)}")
 
         ### LOOK HERE
@@ -340,6 +334,16 @@ class PlinderGraphDataset(Dataset):
             cache_key = f"{self.sample_cache_version}|{self.split}|{system_id}|r{self.pocket_radius}|c{self.contact_cutoff}|m{self.min_pocket_atoms}|pmode{self.pocket_structure_mode}"
             cache_hash = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
             cache_file = os.path.join(self.sample_cache_dir, f"{self.split}__{system_id}__{cache_hash}.pt")
+
+            # if not os.path.exists(cache_file):
+            #     if not hasattr(self, "_debug_warned"):
+            #         print(f"\n[CACHE MISS DEBUG]")
+            #         print(f"Looking for: {cache_file}")
+            #         print(f"Generated Key: {cache_key}")
+            #         print(f"Active Params -> Radius: {self.pocket_radius}, MinAtoms: {self.min_pocket_atoms}, Ver: {self.sample_cache_version}")
+            #         print(f"CHECK: Does this match the files in {self.sample_cache_dir}?")
+            #         self._debug_warned = True
+                    
             if os.path.exists(cache_file):
                 try:
                     return torch.load(cache_file, map_location="cpu")
@@ -401,6 +405,7 @@ class PlinderGraphDataset(Dataset):
             rec_chain_ids = np.array(rec_chain_ids)
             
             # Pharmacophore
+            ########################
             lig_pos = ligand_mol.GetConformer().GetPositions()
             pos_mean = torch.tensor(lig_pos, dtype=torch.float32).mean(dim=0)
             pharma_data = mol_to_torch_pharmacophore(
@@ -421,6 +426,7 @@ class PlinderGraphDataset(Dataset):
             )
 
             # Pocket extraction
+            ##########################3
             ligand_coords = np.asarray(lig_pos)
             lig_centroid = ligand_coords.mean(axis=0)
             dists = np.linalg.norm(rec_coords - lig_centroid, axis=1)
@@ -490,7 +496,6 @@ class PlinderGraphDataset(Dataset):
         """
         from torch_geometric.data import Batch
 
-        # Filter Nones
         data_list = [d for d in data_list if d is not None]
         if not data_list:
             return None
@@ -679,7 +684,6 @@ class PlinderGraphDataset(Dataset):
         if rdkit_loadable is not None:
             weight *= 1.05 if bool(rdkit_loadable) else 0.85
 
-        # Keep training stable: clip and softly normalize around 1.
         weight = float(np.clip(weight, 0.4, 1.6))
         return weight
 

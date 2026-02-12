@@ -10,9 +10,9 @@ general:
     final_model_chains_to_save: 0
     num_final_sampling: 1
     test_sampling_num_per_graph: 1000
-    check_val_every_n_epochs: 5
+    check_val_every_n_epochs: 200
 train:
-    n_epochs: 1000
+    n_epochs: 200
     batch_size: 256
     reference_batch_size: 256
     save_model: True

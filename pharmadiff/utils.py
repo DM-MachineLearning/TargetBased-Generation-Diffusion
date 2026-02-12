@@ -57,6 +57,8 @@ def create_folders(args):
 
 
 def to_dense(data, dataset_info, device=None):
+    if data is None:
+        return None
     if data:
         X, node_mask = to_dense_batch(x=data['ligand'].x, batch=data['ligand'].batch)
     pos, _ = to_dense_batch(x=data['ligand'].pos, batch=data['ligand'].batch)

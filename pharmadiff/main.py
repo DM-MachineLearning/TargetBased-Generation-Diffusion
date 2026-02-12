@@ -85,7 +85,6 @@ def main(cfg: omegaconf.DictConfig):
             print(f"number of test samples: {len(datamodule.test_dataloader())}")
         
     elif cfg.general.resume is not None:
-        # When resuming, we can override some parts of previous configuration
         print("Resuming from {}".format(cfg.general.resume))
         cfg, _ = get_resume(cfg, dataset_infos, train_smiles, cfg.general.resume, test=False)
 
@@ -100,7 +99,6 @@ def main(cfg: omegaconf.DictConfig):
             print("[warning] torch.compile requested but not available in this torch version.")
 
     callbacks = []
-    # need to ignore metrics because otherwise ddp tries to sync them
     params_to_ignore = ['module.model.train_smiles', 'module.model.dataset_infos']
 
     torch.nn.parallel.DistributedDataParallel._set_params_and_buffers_to_ignore_for_model(model, params_to_ignore)
@@ -171,7 +169,6 @@ def main(cfg: omegaconf.DictConfig):
         # if cfg.general.name not in ['debug', 'test']:
         #     trainer.test(model, datamodule=datamodule)
     else:
-        # Start by evaluating test_only_path
         for i in range(cfg.general.num_final_sampling):
             trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)
         if cfg.general.evaluate_all_checkpoints:
