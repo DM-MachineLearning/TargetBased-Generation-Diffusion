@@ -1,7 +1,8 @@
 name: 'plinder'
 datadir: 'data/plinder/'
 remove_h: False
-random_subset: null
+random_subset: 1000
+max_entries: null
 pin_memory: False
 adaptive_loader: False
 pocket_radius: 10.0
@@ -9,6 +10,14 @@ contact_cutoff: 4.5
 min_pocket_atoms: 1
 min_affinity: null
 max_entry_resolution: null
+max_entry_validation_clashscore: null
+min_system_num_interactions: null
+min_ligand_num_interactions: null
+max_ligand_molecular_weight: null
+require_ligand_is_proper: false
+exclude_ligand_artifacts: false
+require_system_has_binding_affinity: false
+pharmacophore_profile: 'plinder'
 require_rdkit_ligand: false
 pocket_structure_mode: 'holo_only'  # holo_only, apo_only, pred_only, apo_pred_random
 apo_pred_swap_prob: 0.0
@@ -19,7 +28,7 @@ allowed_clusters: null
 use_sample_cache: false
 sample_cache_dir: 'data/plinder/sample_cache'
 sample_cache_version: 'v2'
-statistics_max_samples: 2000
+statistics_max_samples: 256
 statistics_num_workers: 16
 statistics_batch_size: 64
 statistics_cache_path: 'data/plinder/statistics.pt'

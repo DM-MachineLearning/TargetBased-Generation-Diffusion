@@ -44,6 +44,62 @@ _AFFINITY_CANDIDATE_COLUMNS = [
     "affinity_data.pki",
     "affinity_data.pIC50",
     "affinity_data.pchembl",
+    "ligand_binding_affinity",
+]
+
+_TRAINING_METADATA_FLOAT_COLUMNS = [
+    "entry_resolution",
+    "entry_validation_clashscore",
+    "entry_validation_rfree",
+    "entry_validation_r",
+    "entry_validation_molprobity",
+    "system_num_interactions",
+    "system_num_unique_interactions",
+    "system_num_pocket_residues",
+    "system_num_heavy_atoms",
+    "system_fraction_atoms_with_crystal_contacts",
+    "ligand_molecular_weight",
+    "ligand_crippen_clogp",
+    "ligand_tpsa",
+    "ligand_qed",
+    "ligand_num_rot_bonds",
+    "ligand_num_hbd",
+    "ligand_num_hba",
+    "ligand_num_rings",
+    "ligand_num_heavy_atoms",
+    "ligand_num_unresolved_heavy_atoms",
+    "ligand_fraction_atoms_with_crystal_contacts",
+    "ligand_num_interactions",
+    "ligand_num_unique_interactions",
+    "ligand_num_pocket_residues",
+    "ligand_posebusters_number_clashes",
+    "ligand_posebusters_smallest_distance_protein",
+    "ligand_posebusters_volume_overlap_protein",
+]
+
+_TRAINING_METADATA_BOOL_COLUMNS = [
+    "system_pass_validation_criteria",
+    "system_has_binding_affinity",
+    "ligand_is_proper",
+    "ligand_is_lipinski",
+    "ligand_is_fragment",
+    "ligand_is_ion",
+    "ligand_is_covalent",
+    "ligand_is_artifact",
+    "ligand_is_invalid",
+    "ligand_is_rdkit_loadable",
+    "ligand_posebusters_all_atoms_connected",
+    "ligand_posebusters_passes_valence_checks",
+    "ligand_posebusters_passes_kekulization",
+]
+
+_TRAINING_METADATA_STR_COLUMNS = [
+    "entry_pdb_id",
+    "entry_determination_method",
+    "system_type",
+    "ligand_ccd_code",
+    "ligand_plip_type",
+    "ligand_unique_ccd_code",
 ]
 
 class PlinderGraphDataset(Dataset):
@@ -73,7 +129,18 @@ class PlinderGraphDataset(Dataset):
         pocket_structure_mode: str = "holo_only",
         apo_pred_swap_prob: float = 0.0,
         max_collision_score: Optional[float] = None,
+        max_entry_validation_clashscore: Optional[float] = None,
+        min_system_num_interactions: Optional[int] = None,
+        min_ligand_num_interactions: Optional[int] = None,
+        max_ligand_molecular_weight: Optional[float] = None,
+        require_ligand_is_proper: bool = False,
+        exclude_ligand_artifacts: bool = False,
+        require_system_has_binding_affinity: bool = False,
+        pharmacophore_profile: str = "plinder",
         require_posebusters_connected: bool = False,
+        random_subset: Optional[int] = None,
+        max_entries: Optional[int] = None,
+        subset_seed: int = 0,
         cluster_column: Optional[str] = None,
         allowed_clusters: Optional[Iterable[Any]] = None,
         use_sample_cache: bool = False,
@@ -81,6 +148,7 @@ class PlinderGraphDataset(Dataset):
         sample_cache_version: str = "v1",
         transform=None,
         debug: bool = False,
+        limit: Optional[int] = None,
     ):
         """
         Args:
@@ -95,6 +163,10 @@ class PlinderGraphDataset(Dataset):
         self.pocket_structure_mode = pocket_structure_mode
         self.apo_pred_swap_prob = apo_pred_swap_prob
         self.use_sample_cache = use_sample_cache
+        self.pharmacophore_profile = pharmacophore_profile
+        self.random_subset = random_subset
+        self.max_entries = max_entries
+        self.subset_seed = int(subset_seed)
         self.cluster_column = cluster_column
         self.allowed_clusters = list(allowed_clusters) if allowed_clusters is not None else None
         self.sample_cache_dir = sample_cache_dir
@@ -140,11 +212,77 @@ class PlinderGraphDataset(Dataset):
             valid_resolution = self.index['entry_resolution'].notna() & (self.index['entry_resolution'] <= max_entry_resolution)
             self.index = self.index[valid_resolution].reset_index(drop=True)
             print(f"--> Applied entry_resolution<={max_entry_resolution}: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping entry resolution filtering (max_entry_resolution={max_entry_resolution})")
+
+        if max_entry_validation_clashscore is not None and 'entry_validation_clashscore' in self.index.columns:
+            before = len(self.index)
+            valid_clash = self.index['entry_validation_clashscore'].notna() & (
+                self.index['entry_validation_clashscore'] <= max_entry_validation_clashscore
+            )
+            self.index = self.index[valid_clash].reset_index(drop=True)
+            print(
+                f"--> Applied entry_validation_clashscore<={max_entry_validation_clashscore}: "
+                f"{before} -> {len(self.index)}"
+            )
+        else:
+            print(f"--> Skipping clashscore filtering (max_entry_validation_clashscore={max_entry_validation_clashscore})")
+
+        if min_system_num_interactions is not None and 'system_num_interactions' in self.index.columns:
+            before = len(self.index)
+            valid_interactions = self.index['system_num_interactions'].fillna(0) >= int(min_system_num_interactions)
+            self.index = self.index[valid_interactions].reset_index(drop=True)
+            print(f"--> Applied system_num_interactions>={min_system_num_interactions}: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping system_num_interactions filtering (min_system_num_interactions={min_system_num_interactions})")
+
+        if min_ligand_num_interactions is not None and 'ligand_num_interactions' in self.index.columns:
+            before = len(self.index)
+            valid_interactions = self.index['ligand_num_interactions'].fillna(0) >= int(min_ligand_num_interactions)
+            self.index = self.index[valid_interactions].reset_index(drop=True)
+            print(f"--> Applied ligand_num_interactions>={min_ligand_num_interactions}: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping ligand_num_interactions filtering (min_ligand_num_interactions={min_ligand_num_interactions})")
+
+        if max_ligand_molecular_weight is not None and 'ligand_molecular_weight' in self.index.columns:
+            before = len(self.index)
+            valid_mw = self.index['ligand_molecular_weight'].notna() & (
+                self.index['ligand_molecular_weight'] <= max_ligand_molecular_weight
+            )
+            self.index = self.index[valid_mw].reset_index(drop=True)
+            print(f"--> Applied ligand_molecular_weight<={max_ligand_molecular_weight}: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping ligand molecular weight filtering (max_ligand_molecular_weight={max_ligand_molecular_weight})")
+
+        if require_ligand_is_proper and 'ligand_is_proper' in self.index.columns:
+            before = len(self.index)
+            self.index = self.index[self.index['ligand_is_proper'] == True].reset_index(drop=True)
+            print(f"--> Applied require_ligand_is_proper: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping ligand_is_proper filtering (require_ligand_is_proper={require_ligand_is_proper})") 
+
+        if exclude_ligand_artifacts and 'ligand_is_artifact' in self.index.columns:
+            before = len(self.index)
+            col = self.index['ligand_is_artifact']
+            keep = col.isna() | (col == False)
+            self.index = self.index[keep].reset_index(drop=True)
+            print(f"--> Applied exclude_ligand_artifacts: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping artifact exclusion filtering (exclude_ligand_artifacts={exclude_ligand_artifacts})")
+
+        if require_system_has_binding_affinity and 'system_has_binding_affinity' in self.index.columns:
+            before = len(self.index)
+            self.index = self.index[self.index['system_has_binding_affinity'] == True].reset_index(drop=True)
+            print(f"--> Applied require_system_has_binding_affinity: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping system_has_binding_affinity filtering (require_system_has_binding_affinity={require_system_has_binding_affinity})")    
 
         if require_rdkit_ligand and 'ligand_is_rdkit_loadable' in self.index.columns:
             before = len(self.index)
             self.index = self.index[self.index['ligand_is_rdkit_loadable'] == True].reset_index(drop=True)
             print(f"--> Applied require_rdkit_ligand: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping RDKit ligand loadability filtering (require_rdkit_ligand={require_rdkit_ligand})")
 
         if max_collision_score is not None and 'system_ligand_has_cofactor_collision' in self.index.columns:
             before = len(self.index)
@@ -153,11 +291,15 @@ class PlinderGraphDataset(Dataset):
             keep = col.isna() | (col.astype(float) <= max_collision_score)
             self.index = self.index[keep].reset_index(drop=True)
             print(f"--> Applied max_collision_score<={max_collision_score}: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping collision score filtering (max_collision_score={max_collision_score})")
 
         if require_posebusters_connected and 'ligand_posebusters_all_atoms_connected' in self.index.columns:
             before = len(self.index)
             self.index = self.index[self.index['ligand_posebusters_all_atoms_connected'] == True].reset_index(drop=True)
             print(f"--> Applied require_posebusters_connected: {before} -> {len(self.index)}")
+        else:
+            print(f"--> Skipping PoseBusters connectivity filtering (require_posebusters_connected={require_posebusters_connected})")
 
         if self.cluster_column is not None:
             if self.cluster_column in self.index.columns:
@@ -170,6 +312,23 @@ class PlinderGraphDataset(Dataset):
             else:
                 print(f"!! WARNING: cluster_column='{self.cluster_column}' not found in index; skipping cluster filtering.")
 
+        if self.max_entries is not None:
+            before = len(self.index)
+            self.index = self.index.iloc[: int(self.max_entries)].reset_index(drop=True)
+            print(f"--> Applied max_entries={self.max_entries}: {before} -> {len(self.index)}")
+
+        if self.random_subset is not None and len(self.index) > int(self.random_subset):
+            before = len(self.index)
+            self.index = self.index.sample(n=int(self.random_subset), random_state=self.subset_seed).reset_index(drop=True)
+            print(f"--> Applied random_subset={self.random_subset} (seed={self.subset_seed}): {before} -> {len(self.index)}")
+
+        ### LOOK HERE
+        # self.index = self.index.head(1000)
+        # if limit is not None:
+        #     before = len(self.index)
+        #     self.index = self.index.head(limit).reset_index(drop=True)
+        #     print(f"--> Applied hard limit: {before} -> {len(self.index)}")
+            
     def __len__(self):
         return len(self.index)
 
@@ -244,7 +403,11 @@ class PlinderGraphDataset(Dataset):
             # Pharmacophore
             lig_pos = ligand_mol.GetConformer().GetPositions()
             pos_mean = torch.tensor(lig_pos, dtype=torch.float32).mean(dim=0)
-            pharma_data = mol_to_torch_pharmacophore(ligand_mol, pos_mean, name='geom')
+            pharma_data = mol_to_torch_pharmacophore(
+                ligand_mol,
+                pos_mean,
+                name=self.pharmacophore_profile,
+            )
             
             if pharma_data is None:
                 if self.debug:
@@ -308,6 +471,7 @@ class PlinderGraphDataset(Dataset):
                 'quality_weight': torch.tensor([quality_weight], dtype=torch.float32),
                 'cluster_id': entry.get(self.cluster_column, None) if self.cluster_column is not None else None,
             }
+            sample.update(self._extract_training_metadata(entry))
             if self.use_sample_cache:
                 try:
                     torch.save(sample, cache_file)
@@ -353,6 +517,9 @@ class PlinderGraphDataset(Dataset):
         pocket_source_list = []
         plip_labels_list = []
         plip_label_mask_list = []
+        metadata_float_list = []
+        metadata_bool_list = []
+        metadata_str_list = []
 
         for i, data in enumerate(data_list):
             pos = data['pocket_pos']
@@ -374,6 +541,9 @@ class PlinderGraphDataset(Dataset):
             pocket_source_list.append(data.get('pocket_source', 'holo'))
             plip_labels_list.append(data['plip_labels'])
             plip_label_mask_list.append(data['plip_label_mask'])
+            metadata_float_list.append(data['metadata_float'])
+            metadata_bool_list.append(data['metadata_bool'])
+            metadata_str_list.append(data['metadata_str'])
 
         ligand_pos_dense, ligand_mask = to_dense_batch(x=batched_ligand.pos, batch=batched_ligand.batch)
         pocket_pos_dense, pocket_mask = to_dense_batch(x=torch.cat(pocket_pos_list, dim=0), batch=torch.cat(pocket_batch_list, dim=0))
@@ -400,6 +570,12 @@ class PlinderGraphDataset(Dataset):
             'cluster_id': cluster_ids,
             'interaction_map': interaction_map,
             'interaction_mask': interaction_mask,
+            'metadata_float': torch.stack(metadata_float_list, dim=0),
+            'metadata_bool': torch.stack(metadata_bool_list, dim=0),
+            'metadata_str': metadata_str_list,
+            'metadata_float_columns': list(_TRAINING_METADATA_FLOAT_COLUMNS),
+            'metadata_bool_columns': list(_TRAINING_METADATA_BOOL_COLUMNS),
+            'metadata_str_columns': list(_TRAINING_METADATA_STR_COLUMNS),
         }
 
     def _select_receptor_path(self, ps: PlinderSystem):
@@ -506,6 +682,58 @@ class PlinderGraphDataset(Dataset):
         # Keep training stable: clip and softly normalize around 1.
         weight = float(np.clip(weight, 0.4, 1.6))
         return weight
+
+    @staticmethod
+    def _safe_float(entry, col: str, default: float = 0.0) -> float:
+        value = entry.get(col, default)
+        try:
+            value = float(value)
+            if np.isnan(value):
+                return default
+            return value
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_bool(entry, col: str, default: bool = False) -> float:
+        value = entry.get(col, default)
+        if value is None:
+            return float(default)
+        if isinstance(value, (bool, np.bool_)):
+            return float(value)
+        if isinstance(value, str):
+            value_lower = value.strip().lower()
+            if value_lower in {"true", "1", "yes", "y"}:
+                return 1.0
+            if value_lower in {"false", "0", "no", "n"}:
+                return 0.0
+        try:
+            return float(bool(int(value)))
+        except (TypeError, ValueError):
+            return float(default)
+
+    @staticmethod
+    def _safe_str(entry, col: str, default: str = "") -> str:
+        value = entry.get(col, default)
+        if value is None:
+            return default
+        return str(value)
+
+    def _extract_training_metadata(self, entry):
+        metadata_float = torch.tensor(
+            [self._safe_float(entry, col, default=0.0) for col in _TRAINING_METADATA_FLOAT_COLUMNS],
+            dtype=torch.float32,
+        )
+        metadata_bool = torch.tensor(
+            [self._safe_bool(entry, col, default=False) for col in _TRAINING_METADATA_BOOL_COLUMNS],
+            dtype=torch.float32,
+        )
+        metadata_str = {col: self._safe_str(entry, col, default="") for col in _TRAINING_METADATA_STR_COLUMNS}
+        return {
+            "metadata_float": metadata_float,
+            "metadata_bool": metadata_bool,
+            "metadata_str": metadata_str,
+        }
 
     @staticmethod
     def _compute_reference_ifp(
