@@ -4,7 +4,7 @@ Use caching (although doesn't seem to work, or so): `python -m pharmadiff.script
 
 Train: `python -m pharmadiff.main experiment=plinder dataset.use_sample_cache=True train.num_workers=4 train.n_epochs=2`
 
-Generation: "Find Out" (Having reached that stage yet:)
+Generation: "Find Out" (Haven't reached that stage yet:)
 
 ### The current configuration is just to use the 1000 entries (hardcoded), and these can be changed. Many other fine-tune knobs also reside in configs/. Storage path can also be changed.
 
